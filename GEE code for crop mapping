@@ -1,0 +1,169 @@
+//////GEE Code of mapping crop types using gap-filled data in Northeast China from 2001 to 2022 ///////////////////////
+/////Taking Sanjiang Plain (SP) in 2005 as an example
+
+////Step 1: prepare related data //////////////////////////////////////////////////////////////////////////////////////
+////1) boundaries including Northeast china and agro-climate zones, 2) ground truth samples 3) gap-filled Landsat data 4)croplandmask
+var NE = ee.FeatureCollection("users/nanshany1993/cropNE/vectors/NEBoundary");
+var SP = ee.FeatureCollection("users/diyuanyuan19970726/boundary/NE_6_agroclimate_zones").filter(ee.Filter.eq("QUHUA_ID",5))
+var Trainedsamples = ee.FeatureCollection("users/diyuanyuan19970726/CDL_NE_longterm_30m_V1_process/sample_2017_2019_training_extractvalues")
+// Trainedsamples is the training dataset, which contains the crop type and features of each crop training sample
+var gapfilled_Data = ee.ImageCollection("projects/ee-emma/assets/GF_Landsat_NE_China") 
+var cropMask = ee.Image("users/diyuanyuan19970726/CDL_NE_longterm_30m_V1/croplandmask_hansen")
+///Cropland mask is from Potapov, P.,et. al.,  Nat Food. https://doi.org/10.1038/s43016-021-00429-z
+
+///2) define parameters
+var year = 2005;
+var zone = SP 
+var samples = Trainedsamples.filterBounds(SP)
+var assetId = 'users/diyuanyuan19970726/CDL_NE_longterm_30m_Imgs'//////
+var bands = ee.List(['swir1','swir2','NDVI','EVI','LSWI','NDTI'])  // 6 index
+var start_day = ee.Date.fromYMD(year,3,1);
+var end_day =  ee.Date.fromYMD(year,11,1);
+
+///Classify in each fishnet
+var fish = ee.FeatureCollection("users/nanshany1993/China/fishnetChina") /////200km fishnet of Northeast China
+var fc = fish.filterBounds(zone) 
+var size = fc.size()
+var fcList = fc.toList(size)
+var ids = ee.List.sequence(0,size.subtract(1))
+ids.evaluate(function(is){
+    for (var i = 0; i < is.length; i++){
+    var aoi = ee.Feature(fcList.get(i)).geometry();
+    Map.addLayer(aoi,{},'aoi')
+    
+    ///prepare 30m gap filled dataset
+    /////Step 2: prepare 30-m gap-filled imagery//////////////////////////////////////////////////////////////////////////////////////
+        function getMonthlyImage(year, month, collection) {
+          var startDate = ee.Date.fromYMD(year, month, 1);
+          var endDate = startDate.advance(1, 'month');
+          var monthlyImages = collection.filterDate(startDate, endDate)
+                                        .filterBounds(aoi);
+          var monthlyComposite = monthlyImages.median();
+          return monthlyComposite.set({'year': year, 'month': month});
+        }
+
+        var monthlyImages = ee.List.sequence(4, 10).map(function(month) {
+          return getMonthlyImage(year, ee.Number(month), gapfilled_Data);
+        });
+
+        var monthlyImageCollection = ee.ImageCollection.fromImages(monthlyImages);
+        print(monthlyImageCollection,'monthlyImageCollection'+year.toString())
+
+    var col =  monthlyImageCollection.map(renamebands).map(getVIs)
+   
+    /////Step 3: prepare features //////////////////////////////////////////////////////////////////////////////////////
+    /////1 vegetation indices
+    var col_growing = col.filter(ee.Filter.rangeContains('month',4,10)).select(bands)///6 index
+    var col_vis = ee.Image(col_growing.iterate(mergeBands, ee.Image([])));
+    
+    /////2  GWCCI
+    var img = col.filter(ee.Filter.rangeContains('month',8,8)).first()
+    var GWCCI = img.addBands(
+            img.expression('ndvi * swir1', {
+              'ndvi': img.normalizedDifference(['nir', 'red']).toFloat(),
+              'swir1': img.select('swir1').toFloat()
+            }).rename('GWCCI')
+          ).select('GWCCI'); 
+    
+    print(GWCCI,'GWCCI')
+
+  
+    /////3  Meteorological data: tempreature, precipitation, soil moisture
+    /////1) tempretature
+    var assetPath = 'users/diyuanyuan19970726/Meteorological_NE/';
+    var monthly_tem = ee.List([]);
+    var bandNames = ee.List([]);
+    for (var month = 4; month <= 10; month++) {
+      var imagePath = assetPath +'tem_NE_'+ year + '_' + month;
+      var image = ee.Image(imagePath).rename('tem_' + month);
+      monthly_tem = monthly_tem.add(image);
+      bandNames = bandNames.add('tem_' + month);
+    }
+    var monthlytem = ee.ImageCollection.fromImages(monthly_tem).toBands().rename(bandNames);
+    ////2) precipitation
+    var monthly_pre = ee.List([]);
+    var bandNames = ee.List([]);
+    for (var month = 4; month <= 10; month++) {
+      var imagePath = assetPath +'pre_NE_'+ year + '_' + month;
+      var image = ee.Image(imagePath).rename('pre_' + month);
+      monthly_pre = monthly_pre.add(image);
+      bandNames = bandNames.add('pre_' + month);
+    }
+    var monthlypre = ee.ImageCollection.fromImages(monthly_pre).toBands().rename(bandNames);
+    ////3) soil moisture 
+    var monthly_sm = ee.List([]);
+    var bandNames = ee.List([]);
+    for (var month = 4; month <= 10; month++) {
+      var imagePath = assetPath +'NE_sm_'+ year + '_' + month;
+      var image = ee.Image(imagePath).rename('sm_' + month);
+      monthly_sm = monthly_sm.add(image);
+      bandNames = bandNames.add('sm_' + month);
+    }
+    var monthlysm = ee.ImageCollection.fromImages(monthly_sm).toBands().rename(bandNames);
+    
+    ///merge all bands   
+    var finalImage = col_vis.addBands(GWCCI).addBands(monthlytem).addBands(monthlypre).addBands(monthlysm)
+    print('finalImage',finalImage)
+    
+    ////Step 4: train crop model and image classification //////////////////////////////////////////////////////////////////
+            var cropRF = ee.Classifier.smileRandomForest({
+              numberOfTrees: 500,
+              minLeafPopulation: 1, 
+              seed: 999})
+      /////////////////////////////selected features
+
+            var trained = cropRF.train({
+              features:samples,
+              classProperty:'class',
+              inputProperties:finalImage.bandNames(),
+            })
+            
+      var classified = finalImage.clip(aoi).classify(trained).updateMask(cropMask.eq(1)).unmask(4)
+      var palette = ['blue', 'red', 'yellow','green', 'black']
+      Map.addLayer(classified,{min:0,max:4,palette:palette},'classified_'+year.toString()+'_'+i.toString())
+      ///export crop maps
+          Export.image.toAsset({
+            image:classified.toUint8(), 
+            description:'cropImg_SP_'+year.toString()+'_'+i.toString(), 
+            assetId:assetId +'/'+'cropImg_SP_'+year.toString()+'_'+i.toString(), 
+            scale:30,
+            region:aoi,
+            crs: 'EPSG:4326',
+            maxPixels:1e13
+          })
+  }
+})
+
+///////////////////functions used in this code
+function mergeBands (image, previous) {
+  return ee.Image(previous).addBands(image);
+};
+function renamebands (img){
+  var year = img.get('year')
+  var month = img.get('month')
+  var date = ee.Date.fromYMD(year,month,1)
+  var bands = img.select(['B1_mean_post','B2_mean_post','B3_mean_post','B4_mean_post','B5_mean_post','B7_mean_post'],
+  ['blue', 'green', 'red','nir','swir1', 'swir2'])
+  .divide(10000)
+  .toFloat()
+  return img.addBands(bands)
+        .set('system:time_start', date.millis())
+}
+function getVIs(img) {
+  var img = ee.Image(img)
+  return img
+    // // Add a NDVI band.
+    .addBands(img.normalizedDifference(['nir', 'red']).toFloat().rename('NDVI'))
+    // Add a EVI band.
+    .addBands(img.expression('2.5*((nir-red)/(nir+6*red-7.5*blue+1))', {
+      'nir':img.select('nir'),
+      'red':img.select('red'),
+      'blue':img.select('blue')
+    }).toFloat().rename('EVI'))
+    // Add a LSWI band.
+    .addBands(img.normalizedDifference(['nir','swir1']).toFloat().rename('LSWI'))
+     // Add a NDTI
+    .addBands(img.normalizedDifference(['swir1','swir2']).toFloat().rename('NDTI'))
+    .updateMask(img.select(0).mask())
+}
+
