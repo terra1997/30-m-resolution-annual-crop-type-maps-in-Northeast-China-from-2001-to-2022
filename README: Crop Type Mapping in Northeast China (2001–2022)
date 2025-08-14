@@ -1,0 +1,39 @@
+1. Overview
+
+This repository contains Google Earth Engine (GEE) scripts for mapping multi-crop types using gap-filled Landsat data in Northeast China. The workflow integrates multi-source satellite imagery and slected features to produce annual crop maps at 30-m resolution. The script is designed to be adaptable to different years, regions, and agro-climatic zones.
+
+2. Dependencies
+Google Earth Engine account
+Access to the following GEE assets (all provided with proper permissions):
+  AOI: A small region is used for an example
+  Gap-filled Landsat image collections
+  Ground truth training samples
+  Cropland mask (Potapov et al., Nat Food 2021)
+  Meteorological data: temperature, precipitation, soil moisture
+
+3. Installation
+Clone or copy the GEE script to your GEE Code Editor workspace.
+Ensure you have read/write access to the specified asset paths or update paths to your own assets.
+Optional: adjust configuration parameters to your study year and region.
+
+4. Workflow
+
+Data Preparation
+   Load boundary vectors, training samples, gap-filled Landsat images, cropland mask, and meteorological data.
+Monthly Image Processing
+  Compute median composites for each month (April–October).
+   Compute vegetation indices and GWCCI band.
+Feature Preparation
+   Stack all indices, GWCCI, and meteorological variables into a final image for classification.
+Model Training & Classification
+   Train Random Forest classifier using training samples.
+Classify and mask with cropland.
+Export classified crop maps to GEE assets.
+
+5. Notes / Adaptation Guidelines
+
+To adapt for other regions, replace the zone variable with training samples for your study area.
+To use different years, update year and ensure gap-filled Landsat and meteorological data exist for the year.
+Make sure all asset paths are accessible to your GEE account or modify paths to your own assets.
+Consider using a smaller fishnet grid for very large areas to reduce processing time.
+
